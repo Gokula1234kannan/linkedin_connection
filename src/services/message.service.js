@@ -1,0 +1,6 @@
+let OpenAI; try { OpenAI = require('openai'); } catch {}
+const banned = ['guaranteed','urgent','buy now','as discussed','as we spoke','i know you'];
+function fallback(lead){ return `Hi ${lead.first_name}, I noticed your role${lead.job_title ? ' as '+lead.job_title : ''} at ${lead.company} and thought it would be good to connect.`.slice(0,280); }
+function safetyFilter(msg, lead){ let clean=(msg||fallback(lead)).replace(/\s+/g,' ').trim().replace(/^"|"$/g,''); for(const w of banned) clean=clean.replace(new RegExp(w,'ig'),''); if(!clean.toLowerCase().includes((lead.first_name||'').toLowerCase())) clean=`Hi ${lead.first_name}, ${clean}`; return clean.slice(0,280); }
+async function generateConnectionMessage(lead){ if(!process.env.OPENAI_API_KEY || !OpenAI) return fallback(lead); const client=new OpenAI({apiKey:process.env.OPENAI_API_KEY}); const prompt=`Generate one polite LinkedIn connection note under 280 characters. No false claims, no aggressive sales language, use only these facts: ${JSON.stringify(lead)}`; const r=await client.chat.completions.create({model:'gpt-4o-mini',messages:[{role:'user',content:prompt}],temperature:0.4}); return safetyFilter(r.choices[0].message.content, lead); }
+module.exports={ generateConnectionMessage, safetyFilter };

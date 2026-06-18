@@ -1,0 +1,11 @@
+require('dotenv').config();
+const { initDb, get, run } = require('../db/database');
+const { canProcessNextJob, randomDelayMs, logRisk } = require('../services/risk.service');
+const { processLeadWithBrowser } = require('../services/playwright.service');
+initDb();
+const TEST_ONCE = process.argv.includes('--once');
+async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function getNextJob(){ return get(`SELECT jobs.id job_id, leads.* FROM outreach_jobs jobs JOIN leads ON leads.id=jobs.lead_id JOIN campaigns ON campaigns.id=jobs.campaign_id WHERE jobs.status='QUEUED' AND campaigns.status='ACTIVE' AND leads.linkedin_url IS NOT NULL ORDER BY jobs.created_at ASC LIMIT 1`); }
+async function update(job, result){ await run('UPDATE outreach_jobs SET status=?, finished_at=DATETIME(\'now\'), error_reason=?, screenshot_path=? WHERE id=?',[result.status,result.error||'',result.screenshotPath||'',job.job_id]); await run('UPDATE leads SET status=?, error_reason=?, updated_at=DATETIME(\'now\') WHERE id=?',[result.status,result.error||'',job.id]); if(result.status==='RISK_DETECTED') await logRisk(result.severity||'HIGH','PLAYWRIGHT_FRICTION',result.error||'Risk detected',result.screenshotPath||''); }
+async function loop(){ console.log('Outreach worker started'); while(true){ const risk=await canProcessNextJob(); if(!risk.allowed){ console.log('Paused:', risk.reason); if(TEST_ONCE) break; await sleep(5*60*1000); continue; } const job=await getNextJob(); if(!job){ console.log('No queued jobs'); if(TEST_ONCE) break; await sleep(60*1000); continue; } console.log(`Processing lead ${job.id}: ${job.first_name} ${job.last_name}`); await run("UPDATE outreach_jobs SET status='PROCESSING', started_at=DATETIME('now') WHERE id=?",[job.job_id]); await run("UPDATE leads SET status='PROCESSING', updated_at=DATETIME('now') WHERE id=?",[job.id]); const result=await processLeadWithBrowser(job); await update(job,result); if(TEST_ONCE) break; if(result.status==='RISK_DETECTED'){ console.log('Risk detected, pausing for 30 minutes'); await sleep(30*60*1000); } else { const delay=randomDelayMs(); console.log(`Waiting ${Math.round(delay/60000)} minutes`); await sleep(delay); } } process.exit(0); }
+loop().catch(e=>{ console.error(e); process.exit(1); });

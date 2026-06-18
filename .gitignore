@@ -1,0 +1,9 @@
+node_modules/
+.env
+data.sqlite
+uploads/*
+screenshots/*
+browser-profile/*
+!uploads/.gitkeep
+!screenshots/.gitkeep
+!browser-profile/.gitkeep
