@@ -1,1 +1,713 @@
-<!doctype html><html><head><title>LinkedIn Connection Engine</title><style>body{font-family:Arial;margin:30px;background:#f6f8fb;color:#17212b}.card{background:white;padding:18px;border-radius:10px;margin-bottom:18px;box-shadow:0 1px 6px #d9e0ea}table{width:100%;border-collapse:collapse;background:white}th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:13px}th{background:#eef2f7}.badge{padding:3px 7px;border-radius:7px;background:#e5e7eb}.nav a{margin-right:12px}button{padding:6px 10px}</style></head><body><h1>LinkedIn Connection Engine</h1><div class="nav"><a href="/">Dashboard</a><a href="/risk-events">Risk Events</a><a href="/export">Export Excel Report</a></div><div class="card"><h2>Upload Excel</h2><form action="/upload" method="post" enctype="multipart/form-data"><input name="name" placeholder="Campaign name"/> <input type="file" name="file" accept=".xlsx,.xls,.csv" required/> <button>Upload</button></form><p>Required: first_name, last_name, company. Optional: job_title, linkedin_url, email, location, notes.</p></div><div class="card"><h2>Status Summary</h2><% if(stats.length===0){ %><p>No leads yet.</p><% } %><% stats.forEach(s=>{ %><span class="badge"><%= s.status %>: <%= s.count %></span> <% }) %></div><div class="card"><h2>Campaigns</h2><table><tr><th>ID</th><th>Name</th><th>Status</th><th>Created</th><th>Action</th></tr><% campaigns.forEach(c=>{ %><tr><td><%= c.id %></td><td><%= c.name %></td><td><%= c.status %></td><td><%= c.created_at %></td><td><form method="post" action="/campaign/<%= c.status==='ACTIVE'?'pause':'resume' %>/<%= c.id %>"><button><%= c.status==='ACTIVE'?'Pause':'Resume' %></button></form></td></tr><% }) %></table></div><div class="card"><h2>Recent Leads</h2><table><tr><th>ID</th><th>Name</th><th>Company</th><th>Title</th><th>LinkedIn</th><th>Message</th><th>Status</th><th>Error</th><th>Action</th></tr><% leads.forEach(l=>{ %><tr><td><%= l.id %></td><td><%= l.first_name %> <%= l.last_name %></td><td><%= l.company %></td><td><%= l.job_title %></td><td><% if(l.linkedin_url){ %><a target="_blank" href="<%= l.linkedin_url %>">Open</a><% } %></td><td><%= l.message %></td><td><%= l.status %></td><td><%= l.error_reason %></td><td><form method="post" action="/campaign/requeue/<%= l.id %>"><button>Requeue</button></form></td></tr><% }) %></table></div></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LinkedIn Connection Engine</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', Arial, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      min-height: 100vh;
+    }
+
+    /* ── Nav ─────────────────────────────────────────────────── */
+    nav {
+      background: #0a66c2;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 52px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    }
+    nav .logo { color: #fff; font-weight: 700; font-size: 17px; margin-right: 24px; }
+    nav a {
+      color: rgba(255,255,255,0.88);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 6px;
+      transition: background 0.15s;
+    }
+    nav a:hover { background: rgba(255,255,255,0.18); color: #fff; }
+    nav .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+
+    /* ── Worker status bar ────────────────────────────────────── */
+    #worker-bar {
+      background: #1e293b;
+      color: #94a3b8;
+      font-size: 12px;
+      padding: 5px 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #worker-bar .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #64748b;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    #worker-bar.online .dot  { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+    #worker-bar.idle .dot    { background: #f59e0b; }
+    #worker-bar.paused .dot  { background: #f59e0b; }
+    #worker-bar.offline .dot { background: #ef4444; }
+    #worker-bar.risk .dot    { background: #ef4444; animation: pulse 1s ease infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+    #worker-label { font-weight: 600; color: #e2e8f0; }
+    #worker-job   { color: #64748b; font-size: 11px; }
+    #worker-queue { margin-left: auto; color: #64748b; }
+    #last-refresh { margin-left: 12px; color: #475569; font-size: 11px; }
+
+    /* ── Layout ──────────────────────────────────────────────── */
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+    /* ── Cards ───────────────────────────────────────────────── */
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 22px 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08), 0 2px 12px rgba(0,0,0,0.04);
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      border-bottom: 1px solid #e8edf2;
+      padding-bottom: 10px;
+    }
+    .card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #0a66c2;
+    }
+    .live-badge {
+      font-size: 11px;
+      font-weight: 600;
+      color: #22c55e;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 20px;
+      padding: 2px 10px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .live-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #22c55e;
+      animation: pulse 1.5s ease infinite;
+    }
+
+    /* ── Flash messages ──────────────────────────────────────── */
+    .flash-success {
+      background: #e6f4ea; border: 1px solid #b7dfbf; color: #256029;
+      border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; font-size: 14px;
+    }
+    .flash-error {
+      background: #fde8e8; border: 1px solid #f5c6cb; color: #7f1d1d;
+      border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; font-size: 14px;
+    }
+    .flash-info {
+      background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+      border-radius: 8px; padding: 12px 18px; margin-bottom: 16px; font-size: 14px;
+    }
+
+    /* ── Quick Connect ───────────────────────────────────────── */
+    .qc-form { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; margin-bottom: 12px; }
+    .qc-form input[type="url"] {
+      flex: 1 1 340px; padding: 10px 14px;
+      border: 2px solid #d0d7de; border-radius: 8px;
+      font-size: 14px; font-family: inherit; transition: border-color 0.2s;
+    }
+    .qc-form input[type="url"]:focus { outline: none; border-color: #0a66c2; }
+    .qc-template-preview {
+      background: #f8faff; border: 1px dashed #b0c4de; border-radius: 8px;
+      padding: 10px 14px; font-size: 13px; color: #374151; margin-top: 8px; font-style: italic;
+    }
+    .qc-template-preview strong { font-style: normal; color: #0a66c2; }
+
+    /* ── Spinner ─────────────────────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: none; width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+      vertical-align: middle; margin-right: 6px;
+    }
+    .processing-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45); z-index: 999;
+      align-items: center; justify-content: center;
+    }
+    .processing-overlay.active { display: flex; }
+    .processing-box {
+      background: #fff; border-radius: 14px; padding: 36px 48px;
+      text-align: center; box-shadow: 0 8px 40px rgba(0,0,0,0.25);
+    }
+    .processing-box .big-spinner {
+      width: 48px; height: 48px;
+      border: 5px solid #e5e7eb; border-top-color: #0a66c2;
+      border-radius: 50%; animation: spin 0.9s linear infinite;
+      margin: 0 auto 18px;
+    }
+    .processing-box p { font-size: 15px; color: #374151; font-weight: 500; }
+    .processing-box small { color: #9ca3af; font-size: 12px; }
+
+    /* ── Status badges ───────────────────────────────────────── */
+    .badge {
+      display: inline-block; padding: 3px 10px;
+      border-radius: 20px; font-size: 12px; font-weight: 500;
+    }
+    .badge-REQUEST_SENT     { background: #d4edda; color: #155724; }
+    .badge-MESSAGE_READY    { background: #d1ecf1; color: #0c5460; }
+    .badge-QUEUED           { background: #fff3cd; color: #856404; }
+    .badge-PROCESSING       { background: #cce5ff; color: #004085; }
+    .badge-FAILED           { background: #f8d7da; color: #721c24; }
+    .badge-RISK_DETECTED    { background: #f8d7da; color: #721c24; }
+    .badge-INVALID          { background: #f8d7da; color: #721c24; }
+    .badge-DUPLICATE        { background: #e2e3e5; color: #383d41; }
+    .badge-ALREADY_CONNECTED{ background: #d4edda; color: #155724; }
+    .badge-ALREADY_PENDING  { background: #fff3cd; color: #856404; }
+    .badge-ACTIVE           { background: #d4edda; color: #155724; }
+    .badge-PAUSED           { background: #e2e3e5; color: #383d41; }
+    .badge-FOLLOW_ONLY      { background: #e2e3e5; color: #383d41; }
+    .badge                  { background: #e2e3e5; color: #383d41; }
+
+    /* ── Stats grid ──────────────────────────────────────────── */
+    .stats-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+    .stat-item {
+      background: #f6f8fb; border: 1px solid #e0e7ef;
+      border-radius: 8px; padding: 10px 16px; font-size: 13px; min-width: 140px;
+      transition: border-color 0.3s;
+    }
+    .stat-item.changed { border-color: #0a66c2; }
+    .stat-item strong { display: block; font-size: 22px; color: #0a66c2; }
+
+    /* ── Upload form ─────────────────────────────────────────── */
+    .upload-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .upload-form input[type="text"] {
+      flex: 1 1 220px; padding: 9px 13px;
+      border: 1px solid #d0d7de; border-radius: 8px;
+      font-size: 14px; font-family: inherit;
+    }
+    .upload-form input[type="file"] { font-size: 13px; }
+
+    .btn {
+      padding: 9px 20px; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      font-family: inherit; transition: background 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary { background: #0a66c2; color: #fff; }
+    .btn-primary:hover { background: #004182; }
+    .btn-danger  { background: #d93025; color: #fff; }
+    .btn-danger:hover { background: #a50e0e; }
+    .btn-success { background: #1a7f37; color: #fff; }
+    .btn-success:hover { background: #0f5323; }
+    .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+    /* ── Tables ──────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      background: #f0f4f8; font-weight: 600; color: #444;
+      padding: 10px 12px; text-align: left;
+      border-bottom: 2px solid #e0e7ef; white-space: nowrap;
+    }
+    td { padding: 9px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+    tr.row-new { animation: rowFlash 1.5s ease; }
+    tr.row-changed { animation: rowFlash 1.5s ease; }
+    @keyframes rowFlash {
+      0%   { background: #eff6ff; }
+      100% { background: transparent; }
+    }
+
+    .url-cell   { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .msg-cell   { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .error-cell { color: #dc3545; font-size: 11px; max-width: 160px; }
+
+    /* ── Activity feed ───────────────────────────────────────── */
+    .activity-list { list-style: none; }
+    .activity-list li {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+    }
+    .activity-list li:last-child { border-bottom: none; }
+    .activity-icon { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+    .activity-time { color: #9ca3af; font-size: 11px; white-space: nowrap; }
+    .activity-msg  { flex: 1; }
+    .activity-empty { color: #9ca3af; font-size: 13px; font-style: italic; }
+
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+
+    .hint { font-size: 12px; color: #6b7280; margin-top: 8px; }
+    a { color: #0a66c2; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">🔗 LinkedIn Engine</span>
+  <a href="/">Dashboard</a>
+  <a href="/risk-events">⚠ Risk Events</a>
+  <a href="/export">⬇ Export Report</a>
+</nav>
+
+<!-- ── Worker Status Bar ─────────────────────────────────────────────────── -->
+<div id="worker-bar">
+  <span class="dot"></span>
+  <span id="worker-label">Worker: checking...</span>
+  <span id="worker-job"></span>
+  <span id="worker-queue"></span>
+  <span id="last-refresh"></span>
+</div>
+
+<div class="container">
+
+  <!-- Flash: Excel upload result -->
+  <% if (flash.upload === 'success') { %>
+  <div class="flash-success">
+    ✅ Upload complete —
+    <strong><%= flash.queued %></strong> jobs queued,
+    <strong><%= flash.duplicates %></strong> duplicates skipped,
+    <strong><%= flash.invalid %></strong> invalid rows.
+    Start the worker in another terminal: <code>npm run worker</code>
+  </div>
+  <% } %>
+
+  <!-- Flash: Quick Connect result -->
+  <% if (flash.qc_result === 'REQUEST_SENT') { %>
+  <div class="flash-success">
+    ✅ <strong>Connection request sent!</strong>
+    <% if (flash.qc_url) { %>
+      Sent to: <a href="<%= flash.qc_url %>" target="_blank" rel="noopener noreferrer"><%= flash.qc_url %></a>
+    <% } %>
+    The connection note was included.
+  </div>
+  <% } else if (flash.qc_result === 'ALREADY_CONNECTED') { %>
+  <div class="flash-info">
+    ℹ️ You are <strong>already connected</strong> with this person.
+  </div>
+  <% } else if (flash.qc_result === 'ALREADY_PENDING') { %>
+  <div class="flash-info">
+    ℹ️ A <strong>connection request is already pending</strong> for this person.
+  </div>
+  <% } else if (flash.qc_result === 'ALREADY_SENT') { %>
+  <div class="flash-info">
+    ℹ️ A connection request was <strong>already sent</strong> to this person.
+  </div>
+  <% } else if (flash.qc_result && flash.qc_result !== 'REQUEST_SENT') { %>
+  <div class="flash-error">
+    ❌ Quick Connect result: <strong><%= flash.qc_result %></strong>
+    <% if (flash.qc_error) { %> — <%= flash.qc_error %><% } %>
+    <br><small>Check the screenshots folder or Risk Events for details.</small>
+  </div>
+  <% } else if (flash.qc_error && !flash.qc_result) { %>
+  <div class="flash-error">
+    ❌ Quick Connect failed: <%= flash.qc_error %>
+  </div>
+  <% } %>
+
+  <!-- ── Quick Connect ────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-header">
+      <h2>⚡ Quick Connect — Single Profile</h2>
+    </div>
+    <form id="qc-form" class="qc-form" action="/quick-connect" method="post"
+          onsubmit="startQC(event)">
+      <input
+        id="qc-url"
+        type="url"
+        name="linkedin_url"
+        placeholder="https://www.linkedin.com/in/username/"
+        pattern="https://.*linkedin\.com/in/.*"
+        required
+      />
+      <button id="qc-btn" class="btn btn-primary" type="submit">
+        <span id="qc-spinner" class="spinner"></span>
+        Send Connection
+      </button>
+    </form>
+    <div class="qc-template-preview">
+      <strong>Standard message template:</strong><br>
+      "Hi [Name]! I came across your LinkedIn profile and would love to connect.
+      I'm always keen to build meaningful professional relationships.
+      Looking forward to connecting with you!"
+      <br><small style="color:#9ca3af">(Note auto-personalised with first name when detectable from URL)</small>
+    </div>
+    <p class="hint" style="margin-top:8px">
+      ℹ️ The browser will open automatically and send the connection request.
+      <strong>Keep this page open</strong> — it will reload with the result (~15-60s). Timeout: 120s.
+    </p>
+  </div>
+
+  <!-- ── Stats + Activity Feed ────────────────────────────────── -->
+  <div class="two-col">
+    <!-- Stats -->
+    <div class="card">
+      <div class="card-header">
+        <h2>📊 Status Summary</h2>
+        <span class="live-badge"><span class="live-dot"></span> LIVE</span>
+      </div>
+      <% if (stats.length === 0) { %>
+        <p class="hint" id="stats-empty">No leads yet — upload an Excel file to get started.</p>
+      <% } %>
+      <div class="stats-grid" id="stats-grid">
+        <% stats.forEach(s => { %>
+        <div class="stat-item" data-status="<%= s.status %>">
+          <strong><%= s.count %></strong>
+          <%= s.status %>
+        </div>
+        <% }) %>
+      </div>
+    </div>
+
+    <!-- Activity Feed -->
+    <div class="card">
+      <div class="card-header">
+        <h2>📡 Activity Feed</h2>
+        <span class="live-badge"><span class="live-dot"></span> LIVE</span>
+      </div>
+      <ul class="activity-list" id="activity-list">
+        <li><span class="activity-empty">No activity yet — start the worker to see live updates.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ── Upload Excel ────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-header"><h2>📤 Upload Leads (Excel / CSV)</h2></div>
+    <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data">
+      <input id="campaign-name" name="name" type="text" placeholder="Campaign name (optional)" />
+      <input id="file-input" type="file" name="file" accept=".xlsx,.xls,.csv" required />
+      <button class="btn btn-primary" type="submit">Upload &amp; Queue</button>
+    </form>
+    <p class="hint">Required columns: <strong>first_name, last_name, company</strong> &nbsp;|&nbsp; Optional: job_title, linkedin_url, email, location, notes</p>
+  </div>
+
+  <!-- ── Campaigns ──────────────────────────────────────────── -->
+  <% if (campaigns.length > 0) { %>
+  <div class="card">
+    <div class="card-header"><h2>📁 Campaigns</h2></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Daily&nbsp;Limit</th>
+            <th>Hourly&nbsp;Limit</th>
+            <th>Created</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% campaigns.forEach(c => { %>
+          <tr>
+            <td><%= c.id %></td>
+            <td><strong><%= c.name %></strong></td>
+            <td><span class="badge badge-<%= c.status %>"><%= c.status %></span></td>
+            <td><%= c.daily_limit %></td>
+            <td><%= c.hourly_limit %></td>
+            <td><%= c.created_at %></td>
+            <td>
+              <% if (c.status === 'ACTIVE') { %>
+              <form method="post" action="/campaign/pause/<%= c.id %>" style="display:inline">
+                <button class="btn btn-sm btn-danger" type="submit">Pause</button>
+              </form>
+              <% } else { %>
+              <form method="post" action="/campaign/resume/<%= c.id %>" style="display:inline">
+                <button class="btn btn-sm btn-success" type="submit">Resume</button>
+              </form>
+              <% } %>
+            </td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <% } %>
+
+  <!-- ── Recent Leads (live-updated) ──────────────────────────── -->
+  <div class="card">
+    <div class="card-header">
+      <h2>👥 Recent Leads (last 200)</h2>
+      <span class="live-badge"><span class="live-dot"></span> LIVE</span>
+    </div>
+    <% if (leads.length === 0) { %>
+      <p class="hint" id="leads-empty">No leads yet.</p>
+    <% } %>
+    <div class="table-wrap">
+      <table id="leads-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Company</th>
+            <th>Title</th>
+            <th>LinkedIn</th>
+            <th>Connection Note</th>
+            <th>Status</th>
+            <th>Error</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="leads-tbody">
+          <% leads.forEach(l => { %>
+          <tr data-lead-id="<%= l.id %>" data-status="<%= l.status %>">
+            <td><%= l.id %></td>
+            <td><strong><%= l.first_name %> <%= l.last_name %></strong></td>
+            <td><%= l.company %></td>
+            <td><%= l.job_title || '—' %></td>
+            <td class="url-cell">
+              <%
+                const safeUrl = (l.linkedin_url || '').startsWith('https://www.linkedin.com/in/')
+                  ? l.linkedin_url : null;
+              %>
+              <% if (safeUrl) { %>
+                <a href="<%= safeUrl %>" target="_blank" rel="noopener noreferrer">Open ↗</a>
+              <% } else { %>
+                <span style="color:#aaa">—</span>
+              <% } %>
+            </td>
+            <td class="msg-cell" title="<%= l.message %>"><%= l.message || '—' %></td>
+            <td><span class="badge badge-<%= l.status %>"><%= l.status %></span></td>
+            <td class="error-cell"><%= l.error_reason || '' %></td>
+            <td>
+              <% if (['FAILED','RISK_DETECTED','CONNECT_NOT_AVAILABLE','LOGIN_FAILED'].includes(l.status)) { %>
+              <form method="post" action="/campaign/requeue/<%= l.id %>">
+                <button class="btn btn-sm btn-primary" type="submit">Retry</button>
+              </form>
+              <% } %>
+            </td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Processing overlay (shows while browser automation runs) -->
+<div class="processing-overlay" id="processing-overlay">
+  <div class="processing-box">
+    <div class="big-spinner"></div>
+    <p>🔗 Connecting on LinkedIn...</p>
+    <p style="margin-top:8px;font-size:13px;color:#6b7280">Browser is opening and sending your request</p>
+    <small>Please keep this page open (~15–60 seconds, timeout 120s)</small>
+  </div>
+</div>
+
+<script>
+  // ── Quick Connect submit handler ──────────────────────────────────────────────
+  function startQC(e) {
+    document.getElementById('processing-overlay').classList.add('active');
+    const btn = document.getElementById('qc-btn');
+    const spinner = document.getElementById('qc-spinner');
+    btn.disabled = true;
+    spinner.style.display = 'inline-block';
+    btn.childNodes[btn.childNodes.length - 1].textContent = ' Connecting...';
+    return true;
+  }
+
+  // Pre-fill URL from query param (for testing)
+  const urlParams = new URLSearchParams(window.location.search);
+  const prefill = urlParams.get('prefill_url');
+  if (prefill) {
+    const input = document.getElementById('qc-url');
+    if (input) input.value = decodeURIComponent(prefill);
+  }
+
+  // ── Real-time polling ──────────────────────────────────────────────────────────
+  // Polls /api/* endpoints and updates DOM without full page reload.
+
+  function timeSince(isoString) {
+    if (!isoString) return '';
+    const sec = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
+    if (sec < 60)  return `${sec}s ago`;
+    if (sec < 3600) return `${Math.floor(sec/60)}m ago`;
+    return `${Math.floor(sec/3600)}h ago`;
+  }
+
+  function activityIcon(eventType) {
+    const map = {
+      WORKER_START: '🚀', WORKER_STOP: '🛑',
+      JOB_STARTED:  '▶️', JOB_DONE:    '✅',
+      JOB_FAILED:   '❌', RISK_PAUSE:  '⚠️',
+    };
+    return map[eventType] || '•';
+  }
+
+  // ── Poll: Worker status (every 3s) ────────────────────────────────────────────
+  async function pollWorkerStatus() {
+    try {
+      const data = await fetch('/api/worker-status').then(r => r.json());
+      if (!data.ok) return;
+
+      const bar   = document.getElementById('worker-bar');
+      const label = document.getElementById('worker-label');
+      const job   = document.getElementById('worker-job');
+      const queue = document.getElementById('worker-queue');
+
+      const statusMap = {
+        RUNNING:    { cls: 'online',  text: '🟢 Worker: Running'    },
+        PROCESSING: { cls: 'online',  text: '🔄 Worker: Processing'  },
+        IDLE:       { cls: 'idle',    text: '🟡 Worker: Idle'        },
+        PAUSED:     { cls: 'paused',  text: '⏸ Worker: Paused'      },
+        RISK_PAUSE: { cls: 'risk',    text: '🔴 Worker: Risk pause'  },
+        STOPPED:    { cls: 'offline', text: '⚫ Worker: Stopped'     },
+        OFFLINE:    { cls: 'offline', text: '🔴 Worker: Offline'     },
+      };
+
+      const st = statusMap[data.workerStatus] || statusMap.OFFLINE;
+      bar.className = st.cls;
+      label.textContent = st.text;
+      job.textContent   = data.currentJob ? `— ${data.currentJob}` : '';
+      queue.textContent = data.queuedCount > 0
+        ? `📋 ${data.queuedCount} job${data.queuedCount !== 1 ? 's' : ''} queued`
+        : '';
+    } catch { /* network error — keep last state */ }
+  }
+
+  // ── Poll: Stats (every 5s) ────────────────────────────────────────────────────
+  async function pollStats() {
+    try {
+      const data = await fetch('/api/stats').then(r => r.json());
+      if (!data.ok) return;
+
+      const grid = document.getElementById('stats-grid');
+      const empty = document.getElementById('stats-empty');
+      if (empty && data.stats.length > 0) empty.style.display = 'none';
+
+      data.stats.forEach(s => {
+        let item = grid.querySelector(`[data-status="${s.status}"]`);
+        if (!item) {
+          // New status appeared — add it
+          item = document.createElement('div');
+          item.className = 'stat-item';
+          item.dataset.status = s.status;
+          item.innerHTML = `<strong>${s.count}</strong>${s.status}`;
+          grid.appendChild(item);
+        } else {
+          const strong = item.querySelector('strong');
+          if (strong.textContent !== String(s.count)) {
+            strong.textContent = s.count;
+            item.classList.add('changed');
+            setTimeout(() => item.classList.remove('changed'), 1500);
+          }
+        }
+      });
+
+      // Update last-refresh timestamp
+      document.getElementById('last-refresh').textContent =
+        `Refreshed: ${new Date().toLocaleTimeString()}`;
+    } catch { /* ignore */ }
+  }
+
+  // ── Poll: Leads table (every 8s) ─────────────────────────────────────────────
+  async function pollLeads() {
+    try {
+      const data = await fetch('/api/leads').then(r => r.json());
+      if (!data.ok) return;
+
+      const tbody = document.getElementById('leads-tbody');
+      const empty = document.getElementById('leads-empty');
+      if (empty && data.leads.length > 0) empty.style.display = 'none';
+
+      const existingIds = new Set(
+        [...tbody.querySelectorAll('tr[data-lead-id]')].map(r => r.dataset.leadId)
+      );
+
+      data.leads.forEach(l => {
+        const safeUrl = (l.linkedin_url || '').startsWith('https://www.linkedin.com/in/')
+          ? l.linkedin_url : null;
+
+        const retryStatuses = ['FAILED','RISK_DETECTED','CONNECT_NOT_AVAILABLE','LOGIN_FAILED'];
+        const retryBtn = retryStatuses.includes(l.status)
+          ? `<form method="post" action="/campaign/requeue/${l.id}">
+               <button class="btn btn-sm btn-primary" type="submit">Retry</button>
+             </form>`
+          : '';
+        const urlCell = safeUrl
+          ? `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">Open ↗</a>`
+          : '<span style="color:#aaa">—</span>';
+
+        const html = `
+          <td>${l.id}</td>
+          <td><strong>${l.first_name || ''} ${l.last_name || ''}</strong></td>
+          <td>${l.company || ''}</td>
+          <td>${l.job_title || '—'}</td>
+          <td class="url-cell">${urlCell}</td>
+          <td class="msg-cell" title="${(l.message||'').replace(/"/g,'&quot;')}">${l.message || '—'}</td>
+          <td><span class="badge badge-${l.status}">${l.status}</span></td>
+          <td class="error-cell">${l.error_reason || ''}</td>
+          <td>${retryBtn}</td>`;
+
+        let row = tbody.querySelector(`tr[data-lead-id="${l.id}"]`);
+        if (!row) {
+          // New lead — prepend with flash animation
+          row = document.createElement('tr');
+          row.dataset.leadId = l.id;
+          row.dataset.status = l.status;
+          row.innerHTML = html;
+          row.classList.add('row-new');
+          tbody.prepend(row);
+        } else if (row.dataset.status !== l.status) {
+          // Status changed — update and flash
+          row.dataset.status = l.status;
+          row.innerHTML = html;
+          row.classList.add('row-changed');
+          setTimeout(() => row.classList.remove('row-changed'), 1500);
+        }
+      });
+    } catch { /* ignore */ }
+  }
+
+  // ── Poll: Activity feed (every 5s) ────────────────────────────────────────────
+  async function pollActivity() {
+    try {
+      const data = await fetch('/api/activity').then(r => r.json());
+      if (!data.ok || !data.activity.length) return;
+
+      const list = document.getElementById('activity-list');
+      list.innerHTML = data.activity.map(a => `
+        <li>
+          <span class="activity-icon">${activityIcon(a.event_type)}</span>
+          <span class="activity-msg">${a.message}</span>
+          <span class="activity-time">${timeSince(a.created_at)}</span>
+        </li>`).join('');
+    } catch { /* ignore */ }
+  }
+
+  // ── Start polling loops ────────────────────────────────────────────────────────
+  // Stagger the initial calls so they don't all fire at once
+  pollWorkerStatus();
+  pollStats();
+  pollActivity();
+  setTimeout(pollLeads, 500);
+
+  setInterval(pollWorkerStatus, 3000);
+  setInterval(pollStats,        5000);
+  setInterval(pollActivity,     5000);
+  setInterval(pollLeads,        8000);
+</script>
+
+</body>
+</html>
