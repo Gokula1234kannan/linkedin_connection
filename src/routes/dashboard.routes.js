@@ -9,7 +9,7 @@
  */
 
 const express = require('express');
-const { all } = require('../db/database');
+const { all, run } = require('../db/database');
 
 const router = express.Router();
 
@@ -52,6 +52,16 @@ router.get('/risk-events', async (req, res) => {
     res.render('risk-events', { events });
   } catch (err) {
     res.status(500).send('Error loading risk events: ' + err.message);
+  }
+});
+
+// Clear risk events
+router.post('/risk-events/clear', async (req, res) => {
+  try {
+    await run('DELETE FROM risk_events');
+    res.redirect('/risk-events');
+  } catch (err) {
+    res.status(500).send('Error clearing risk events: ' + err.message);
   }
 });
 

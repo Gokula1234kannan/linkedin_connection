@@ -16,12 +16,14 @@ require('dotenv').config();
 const { initDb, get, run, all } = require('../db/database');
 const { canProcessNextJob, randomDelayMs, logRisk } = require('../services/risk.service');
 const { processLeadWithBrowser } = require('../services/playwright.service');
+const { sendOutreachEmail } = require('../services/email.service');
 
 // ── Initialise DB ─────────────────────────────────────────────────────────────
 initDb();
 
 const TEST_ONCE = process.argv.includes('--once');
 let running = true;
+let currentWorkerStatus = 'RUNNING';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -33,6 +35,7 @@ function sleep(ms) {
  * live worker state without the worker process being directly accessible.
  */
 async function setWorkerState(status, currentJob = '') {
+  if (status) currentWorkerStatus = status;
   const now = new Date().toISOString();
   const upsert = (key, value) =>
     run(
@@ -171,7 +174,7 @@ async function loop() {
   await logActivity(null, 'WORKER_START', 'Worker process started');
 
   // Periodic heartbeat: update worker_last_seen every 30s so dashboard can detect if worker dies
-  const heartbeatInterval = setInterval(() => setWorkerState('RUNNING').catch(() => {}), 30_000);
+  const heartbeatInterval = setInterval(() => setWorkerState(currentWorkerStatus).catch(() => {}), 30_000);
 
   // Reset any jobs that were stuck in PROCESSING (from a previous crash)
   await resetStuckJobs();
@@ -217,6 +220,25 @@ async function loop() {
       result.success ? 'JOB_DONE' : 'JOB_FAILED',
       `${job.first_name} ${job.last_name}: ${result.status}${result.error ? ` — ${result.error}` : ''}`
     );
+
+    // ── Send Email Follow-up ───────────────────────────────────────────────
+    if (result.success && job.email) {
+      console.log(`📧 Attempting to send follow-up email to ${job.email}...`);
+      const emailSent = await sendOutreachEmail(job.email, job.first_name, job.message);
+      if (emailSent) {
+        await logActivity(
+          job.id,
+          'EMAIL_SENT',
+          `Sent follow-up email to ${job.email}`
+        );
+      } else {
+        await logActivity(
+          job.id,
+          'EMAIL_FAILED',
+          `Failed to send follow-up email to ${job.email}`
+        );
+      }
+    }
 
     if (TEST_ONCE) {
       clearInterval(heartbeatInterval);

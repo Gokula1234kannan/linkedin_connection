@@ -74,11 +74,11 @@ router.get('/worker-status', async (req, res) => {
 });
 
 // ── GET /api/activity ─────────────────────────────────────────────────────────
-// Returns the 20 most recent activity log entries.
+// Returns the 100 most recent activity log entries.
 router.get('/activity', async (req, res) => {
   try {
     const activity = await all(
-      'SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 20'
+      'SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 100'
     );
     res.json({ ok: true, activity });
   } catch (err) {

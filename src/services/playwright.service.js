@@ -180,7 +180,7 @@ async function doLogin(page) {
 
   // ── Wait for the email field to become visible ────────────────────────────
   console.log('  Waiting for email/username field...');
-  const emailLoc = page.locator('input[type="email"]:visible, input[name="session_key"]:visible, #username:visible, input[autocomplete*="username"]:visible').first();
+  const emailLoc = page.locator('input[name="session_key"]:visible, #username:visible, input[type="email"]:visible').first();
   let emailFieldFound = false;
   try {
     await emailLoc.waitFor({ state: 'visible', timeout: 10000 });
@@ -233,7 +233,7 @@ async function doLogin(page) {
 
   await randomSleep(600, 1200);
 
-  const passwordLoc = page.locator('input[type="password"]:visible, input[name="session_password"]:visible, #password:visible').first();
+  const passwordLoc = page.locator('input[name="session_password"]:visible, #password:visible, input[type="password"]:visible').first();
   try {
     await passwordLoc.waitFor({ state: 'visible', timeout: 5000 });
     await idlePause('before password');
@@ -247,14 +247,12 @@ async function doLogin(page) {
   await randomSleep(800, 1800);
 
   // ── Submit ────────────────────────────────────────────────────────────────
-  const submitLoc = page.locator('button[type="submit"]:visible, button:has-text("Sign in"):visible, button:text("Sign in"):visible, input[type="submit"]:visible').first();
   try {
-    await submitLoc.waitFor({ state: 'visible', timeout: 5000 });
-    await humanClick(page, submitLoc);
-    console.log('  ✓ Submit clicked (human-like)');
+    await passwordLoc.press('Enter');
+    console.log('  ✓ Pressed Enter to submit form');
   } catch (err) {
     const screenshotPath = await takeScreenshot(page, 'login-submit-fail');
-    return { success: false, reason: `Submit button not found. Screenshot: ${screenshotPath}` };
+    return { success: false, reason: `Failed to submit form. Screenshot: ${screenshotPath}` };
   }
 
   // ── Wait for redirect ─────────────────────────────────────────────────────
@@ -294,25 +292,23 @@ async function doLogin(page) {
   return { success: true };
 }
 
-/**
- * Ensures the browser is logged into LinkedIn.
- * First checks if already logged in (session in browser-profile) before trying to log in.
- */
 async function ensureLoggedIn(page) {
-  const url = page.url();
+  let url = page.url();
+  
+  if (url === 'about:blank' || url === '') {
+    console.log('  Navigating to feed to check login state...');
+    await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await sleep(2000);
+    url = page.url();
+  }
 
-  // Already on a login page → login immediately
   if (url.includes('/login') || url.includes('/authwall') || url.includes('/signup')) {
     return doLogin(page);
   }
-
-  // Check if we're actually logged in
   if (await isLoggedIn(page)) {
     console.log('  ✓ Already logged in (session active in browser-profile)');
     return { success: true };
   }
-
-  // Not logged in → do login
   return doLogin(page);
 }
 
@@ -357,11 +353,11 @@ async function sendConnectionWithNote(page, lead, state = {}) {
   console.log(`  → Connect path: ${via}`);
 
   if (via === 'direct') {
-    // Direct "Connect" button (1st/2nd degree) — only match a VISIBLE top-level button
-    // Do NOT use aria-label*="connect" here — that also matches the hidden dropdown item!
-    const directBtn = topCard.locator('button')
-      .filter({ hasText: /^connect$/i })  // exact text match only
+    // Direct "Connect" button (1st/2nd degree)
+    const directBtn = topCard
+      .locator('button, a, [role="button"]').filter({ hasText: /^connect$/i })
       .or(topCard.locator('a[href*="/preload/custom-invite/"]'))
+      .or(topCard.locator('[aria-label*="connect" i]'))
       .first();
     const hasDirectBtn = await directBtn.isVisible({ timeout: 2000 }).catch(() => false);
 
@@ -519,32 +515,19 @@ async function sendConnectionWithNote(page, lead, state = {}) {
   await takeScreenshot(page, '05-before-send');
 
   const sendSelectors = [
-    // #1 BEST — exact aria-labels confirmed from DevTools
     'button[aria-label="Send invitation"]',
     'button[aria-label="Send without a note"]',
-    'button[aria-label="Send now"]',
     'button[aria-label="Send"]',
-    // Dialog-scoped text selectors
-    'div[role="dialog"] button:has-text("Send invitation")',
-    'div[role="dialog"] button:has-text("Send now")',
     'div[role="dialog"] button:has-text("Send")',
-    '.artdeco-modal button:has-text("Send invitation")',
-    '.artdeco-modal button:has-text("Send now")',
     '.artdeco-modal button:has-text("Send")',
-    // Broad fallbacks
     'button:has-text("Send without a note")',
     'button:has-text("Send invitation")',
-    'button:has-text("Send now")',
     'button:has-text("Send")',
   ];
 
   let sendBtn = null;
   for (const sel of sendSelectors) {
-    // Use .last() for generic selectors to skip hidden/aria-hidden copies,
-    // but .first() for aria-label selectors which are always unique.
-    const candidate = sel.includes('aria-label')
-      ? page.locator(sel).first()
-      : page.locator(sel).last();
+    const candidate = page.locator(sel).last();
     const visible = await candidate.isVisible({ timeout: 1500 }).catch(() => false);
     if (visible) {
       sendBtn = candidate;

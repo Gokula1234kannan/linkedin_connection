@@ -47,32 +47,31 @@ async function ensureLoggedIn(page) {
   await page.goto('https://www.linkedin.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(2500);
 
-  const emailField = page.locator('input[name="session_key"], #username, input[type="email"]').first();
+  const emailField = page.locator('input[name="session_key"]:visible, #username:visible, input[type="email"]:visible').first();
   await emailField.waitFor({ state: 'visible', timeout: 10000 });
   await emailField.fill(process.env.LINKEDIN_EMAIL);
   console.log('  Email filled:', process.env.LINKEDIN_EMAIL);
   await sleep(400);
 
-  const passField = page.locator('input[name="session_password"], #password, input[type="password"]').first();
+  const passField = page.locator('input[name="session_password"]:visible, #password:visible, input[type="password"]:visible').first();
   await passField.waitFor({ state: 'visible', timeout: 5000 });
   await passField.fill(process.env.LINKEDIN_PASSWORD);
   console.log('  Password filled');
   await sleep(400);
 
-  const submitBtn = page.locator('button[type="submit"], button:has-text("Sign in")').first();
-  await submitBtn.click();
-  console.log('  Submit clicked');
+  await passField.press('Enter');
+  console.log('  Pressed Enter to submit form');
 
   await page.waitForURL(u => !u.toString().includes('/login'), { timeout: 30000 }).catch(() => {});
   await sleep(2000);
   console.log('  Post-login URL:', page.url());
 
-  if (page.url().includes('/checkpoint') || page.url().includes('/challenge')) {
-    await screenshot(page, 'checkpoint');
-    console.log('  Security checkpoint! Please complete it in the browser (60s)...');
+  if (page.url().includes('/checkpoint') || page.url().includes('/challenge') || page.url().includes('login.live.com')) {
+    await screenshot(page, 'checkpoint-or-sso');
+    console.log('  Security checkpoint or SSO required! Please complete it in the browser (90s)...');
     await page.waitForURL(
-      u => !u.toString().includes('/checkpoint') && !u.toString().includes('/challenge'),
-      { timeout: 60000 }
+      u => !u.toString().includes('/checkpoint') && !u.toString().includes('/challenge') && !u.toString().includes('login.live.com'),
+      { timeout: 90000 }
     ).catch(() => {});
   }
 
